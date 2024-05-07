@@ -109,6 +109,7 @@ Resources:
           Prefix: 'logs/'
         User: !Ref SnowflakeUser
         PrivateKey: !Ref SnowflakePrivateKey
+        KeyPassphrase: !Ref SnowflakeKeyPassphrase
         Database: !Ref SnowflakeDatabase
         Schema: !Ref SnowflakeSchema
         Table: !Ref SnowflakeTable
