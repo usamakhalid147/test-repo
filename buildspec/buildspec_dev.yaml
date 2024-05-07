@@ -1,0 +1,105 @@
+version: 0.2
+
+env:
+  variables:
+    DevCrossAccountRoleArn: arn:aws:iam::853641056903:role/cross-account-role-serverless-deployment
+
+    DevStageName: "dev"
+    DEVSourceBucketNamePrimary: "devckevendor"
+    DEVReportingDataBucketNamePrimary: "devckereportingdata"
+    DEVLambdaBucketNamePrimary: "devckelambda"
+    DEVArchiveBucketNamePrimary: "devckearchive"
+    DEVConfigBucketNamePrimary: "devckelambda"
+
+    #DevStageName: "dev"
+    DEVSourceBucketNameSecondary: "devckevendor"
+    DEVReportingDataBucketNameSecondary: "devckereportingdata-us-east-1"
+    DEVLambdaBucketNameSecondary: "devckelambda-us-east-1"
+    DEVArchiveBucketNameSecondary: "devckearchive-us-east-1"
+    DEVConfigBucketNameSecondary: "devckelambda-us-east-1"
+
+
+phases:
+  pre_build:
+    commands:
+      - |
+        python --version
+        for dir in lambdas/*; do
+          if [ -d "$dir" ]; then
+            folder_name=$(basename "$dir")
+            pushd $dir
+            ls -ltra
+            # Run pip install if requirements.txt exists
+            if [ -f "requirements.txt" ]; then
+              pip install -r requirements.txt -t .
+            fi            
+            zip -q -r "$folder_name.zip" *
+            aws s3 cp "$folder_name.zip" "s3://$DEVLambdaBucketNamePrimary/lambdas/$folder_name.zip"
+            aws s3 cp "$folder_name.zip" "s3://$DEVLambdaBucketNameSecondary/lambdas/$folder_name.zip"
+            rm "$folder_name.zip"
+            popd
+
+            xenial_order_version_primary=$(aws s3api head-object --bucket "$DEVLambdaBucketNamePrimary" --key "lambdas/XenialOrders.zip" | jq -r ".VersionId")
+            replayXenialOrders_version_primary=$(aws s3api head-object --bucket "$DEVLambdaBucketNamePrimary" --key "lambdas/replayXenialOrders.zip" | jq -r ".VersionId")
+            tokenvalidationxenial_version_primary=$(aws s3api head-object --bucket "$DEVLambdaBucketNamePrimary" --key "lambdas/tokenvalidationxenial.zip" | jq -r ".VersionId")
+
+            xenial_order_version_secondary=$(aws s3api head-object --bucket "$DEVLambdaBucketNameSecondary" --key "lambdas/XenialOrders.zip" | jq -r ".VersionId")
+            replayXenialOrders_version_secondary=$(aws s3api head-object --bucket "$DEVLambdaBucketNameSecondary" --key "lambdas/replayXenialOrders.zip" | jq -r ".VersionId")
+            tokenvalidationxenial_version_secondary=$(aws s3api head-object --bucket "$DEVLambdaBucketNameSecondary" --key "lambdas/tokenvalidationxenial.zip" | jq -r ".VersionId")
+
+          fi
+        done
+        ## Upload the Layer archive to Lambda Bucket
+        #aws s3 cp "layers/snowflake-connector/PythonSnowflakeConnector.zip" "s3://$DEVLambdaBucketName/layers/snowflake-connector/PythonSnowflakeConnector.zip"
+        #snowflake_connector_s3_object_version=$(aws s3api head-object --bucket "$DEVLambdaBucketName" --key "layers/snowflake-connector/PythonSnowflakeConnector.zip" | jq -r ".VersionId")
+        
+        #Use xenial AWS secret for authorization
+        Xenial_secret=$(aws secretsmanager get-secret-value --secret-id github/xenial/authorization --query SecretString --output text --region us-east-2)
+  build:
+    on-failure: ABORT
+    commands:
+        ## Assume the cross-account role to Dev account 
+        - aws sts assume-role --role-arn $DevCrossAccountRoleArn --role-session-name "AssumeRoleSession" > assumed_role.json
+        - export AWS_ACCESS_KEY_ID=$(cat assumed_role.json | jq -r '.Credentials.AccessKeyId')
+        - export AWS_SECRET_ACCESS_KEY=$(cat assumed_role.json | jq -r '.Credentials.SecretAccessKey')
+        - export AWS_SESSION_TOKEN=$(cat assumed_role.json | jq -r '.Credentials.SessionToken')
+        - aws sts get-caller-identity
+        - |
+          aws --debug --region us-east-2 cloudformation deploy \
+            --template-file ./config/xenial.yaml \
+            --stack-name CF-CKEXENIAL-DEV \
+            --s3-bucket $DEVLambdaBucketNamePrimary \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --parameter-overrides \
+              "SnowflakeTable=$snowflaketable" \
+
+              "ArchiveBucketName=$DEVArchiveBucketNamePrimary" \
+              "StageName=$DevStageName" \
+              "XenialOrderLambdaVersion=$xenial_order_version_primary" \
+              "XenialAuthCode=$Xenial_secret" \
+              "ReplayXenialOrdersLambdaVersion=$replayXenialOrders_version_primary" \
+              "TokenValidationXenialLambdaVersion=$tokenvalidationxenial_version_primary" \
+              "LambdaBucketName=$DEVLambdaBucketNamePrimary" \
+              "CKEBUCKET=$DEVReportingDataBucketNamePrimary" \
+            --tags \
+              "Project=Xenial Transaction Streaming" "CostCenter=Corporate Applications" \
+              "Owner=Corporate Applications" "Environment=dev" "SupportPartner=AWS" \
+              "Team=Integration" "ProjectExpiration=12/31/9999" "CreatedBy=vvegesna@ckr.com"
+              
+        #- aws --region us-east-2 cloudformation deploy --template-file ./config/xenial.yaml --stack-name CF-CKEXENIAL-DEV --s3-bucket $DEVLambdaBucketNamePrimary --capabilities CAPABILITY_NAMED_IAM  --parameter-overrides  "ArchiveBucketName=$DEVArchiveBucketNamePrimary" "StageName=$DevStageName" "XenialOrderLambdaVersion=$xenial_order_version_primary" "XenialAuthCode=$Xenial_secret" "ReplayXenialOrdersLambdaVersion=$replayXenialOrders_version_primary" "TokenValidationXenialLambdaVersion=$tokenvalidationxenial_version_primary" "LambdaBucketName=$DEVLambdaBucketNamePrimary" "CKEBUCKET=$DEVReportingDataBucketNamePrimary" --tags "Project=Xenial Transaction Streaming" "CostCenter=Corporate Applications" "Owner=Corporate Applications" "Environment=dev" "SupportPartner=AWS" "Team=Integration" "ProjectExpiration=12/31/9999" "CreatedBy=vvegesna@ckr.com"
+      
+        #aws --region us-east-1 cloudformation deploy --template-file ./config/xenial.yaml --stack-name CF-CKEXENIAL-DEV --s3-bucket $DEVLambdaBucketNameSecondary --capabilities CAPABILITY_NAMED_IAM  --parameter-overrides  "ArchiveBucketName=$DEVArchiveBucketNameSecondary" "StageName=$DevStageName" "XenialOrderLambdaVersion=$xenial_order_version_secondary" "XenialAuthCode=$Xenial_secret" "ReplayXenialOrdersLambdaVersion=$replayXenialOrders_version_secondary" "TokenValidationXenialLambdaVersion=$tokenvalidationxenial_version_secondary" "LambdaBucketName=$DEVLambdaBucketNameSecondary" "CKEBUCKET=$DEVReportingDataBucketNameSecondary" --tags "CostCenter=Corporate Applications" "Owner=Corporate Applications" Environment=dev SupportPartner=AWS Team=Integration ProjectExpiration=12/31/9999 CreatedBy=vvegesna@ckr.com
+
+  post_build:
+    commands:
+      - |
+        
+        ## Deploy API Stage
+        restapiid=$(aws --region us-east-2 cloudformation describe-stacks --stack-name CF-CKEXENIAL-DEV --query 'Stacks[0].Outputs[?OutputKey==`RestAPIId`].OutputValue' --output text)
+        aws apigateway create-deployment --rest-api-id $restapiid --stage-name $DevStageName
+
+        #restapiid=$(aws --region us-east-1 cloudformation describe-stacks --stack-name CF-CKEXENIAL-DEV --query 'Stacks[0].Outputs[?OutputKey==`RestAPIId`].OutputValue' --output text)
+        #aws apigateway create-deployment --rest-api-id $restapiid --stage-name $DevStageName
+
+
+

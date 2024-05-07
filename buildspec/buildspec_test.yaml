@@ -1,0 +1,69 @@
+version: 0.2
+
+env:
+  variables:
+    TESTCrossAccountRoleArn: arn:aws:iam::814214226142:role/cross-account-role-serverless-deployment
+
+    TestStageName: "test"
+    TESTSourceBucketNamePrimary: "testckevendor"
+    TESTReportingDataBucketNamePrimary: "testckereportingdata"
+    TESTLambdaBucketNamePrimary: "devckelambda"
+    TESTArchiveBucketNamePrimary: "testckearchive"
+    TESTConfigBucketNamePrimary: "devckelambda"
+
+    #TESTStageName: "TEST"
+    # TESTSourceBucketNameSecondary: "TESTckevendor"
+    # TESTReportingDataBucketNameSecondary: "TESTckereportingdata-us-east-1"
+    # TESTLambdaBucketNameSecondary: "TESTckelambda-us-east-1"
+    # TESTArchiveBucketNameSecondary: "TESTckearchive-us-east-1"
+    # TESTConfigBucketNameSecondary: "TESTckelambda-us-east-1"
+
+
+phases:
+  pre_build:
+    commands:
+      - |
+        python --version
+        for dir in lambdas/*; do
+          if [ -d "$dir" ]; then
+            folder_name=$(basename "$dir")
+            pushd $dir
+            ls -ltra
+            # Run pip install if requirements.txt exists
+            if [ -f "requirements.txt" ]; then
+              pip install -r requirements.txt -t .
+            fi            
+            zip -q -r "$folder_name.zip" *
+            aws s3 cp "$folder_name.zip" "s3://$TESTLambdaBucketNamePrimary/lambdas/$folder_name.zip"
+            #aws s3 cp "$folder_name.zip" "s3://$TESTLambdaBucketNameSecondary/lambdas/$folder_name.zip"
+            rm "$folder_name.zip"
+            popd
+
+            xenial_order_version_primary=$(aws s3api head-object --bucket "$TESTLambdaBucketNamePrimary" --key "lambdas/XenialOrders.zip" | jq -r ".VersionId")
+            replayXenialOrders_version_primary=$(aws s3api head-object --bucket "$TESTLambdaBucketNamePrimary" --key "lambdas/replayXenialOrders.zip" | jq -r ".VersionId")
+            tokenvalidationxenial_version_primary=$(aws s3api head-object --bucket "$TESTLambdaBucketNamePrimary" --key "lambdas/tokenvalidationxenial.zip" | jq -r ".VersionId")
+
+            # xenial_order_version_secondary=$(aws s3api head-object --bucket "$TESTLambdaBucketNameSecondary" --key "lambdas/XenialOrders.zip" | jq -r ".VersionId")
+            # replayXenialOrders_version_secondary=$(aws s3api head-object --bucket "$TESTLambdaBucketNameSecondary" --key "lambdas/replayXenialOrders.zip" | jq -r ".VersionId")
+            # tokenvalidationxenial_version_secondary=$(aws s3api head-object --bucket "$TESTLambdaBucketNameSecondary" --key "lambdas/tokenvalidationxenial.zip" | jq -r ".VersionId")
+
+          fi
+        done
+        ## Upload the Layer archive to Lambda Bucket
+        #aws s3 cp "layers/snowflake-connector/PythonSnowflakeConnector.zip" "s3://$TESTLambdaBucketName/layers/snowflake-connector/PythonSnowflakeConnector.zip"
+        #snowflake_connector_s3_object_version=$(aws s3api head-object --bucket "$TESTLambdaBucketName" --key "layers/snowflake-connector/PythonSnowflakeConnector.zip" | jq -r ".VersionId")
+        
+        #Use xenial AWS secret for authorization
+        Xenial_secret=$(aws secretsmanager get-secret-value --secret-id github/xenial/authorization --query SecretString --output text --region us-east-2)
+  post_build:
+    commands:
+      - |
+        
+        ## Assume the cross-account role to TEST account
+        aws sts assume-role --role-arn $TESTCrossAccountRoleArn --role-session-name "AssumeRoleSession" > assumed_role.json
+        export AWS_ACCESS_KEY_ID=$(cat assumed_role.json | jq -r '.Credentials.AccessKeyId')
+        export AWS_SECRET_ACCESS_KEY=$(cat assumed_role.json | jq -r '.Credentials.SecretAccessKey')
+        export AWS_SESSION_TOKEN=$(cat assumed_role.json | jq -r '.Credentials.SessionToken')
+        aws --region us-east-2 cloudformation deploy --template-file ./config/xenial.yaml --stack-name CF-CKEXENIAL-TEST --s3-bucket $TESTLambdaBucketNamePrimary --capabilities CAPABILITY_NAMED_IAM  --parameter-overrides  "ArchiveBucketName=$TESTArchiveBucketNamePrimary" "StageName=$TestStageName" "XenialOrderLambdaVersion=$xenial_order_version_primary" "XenialAuthCode=$Xenial_secret" "ReplayXenialOrdersLambdaVersion=$replayXenialOrders_version_primary" "TokenValidationXenialLambdaVersion=$tokenvalidationxenial_version_primary" "LambdaBucketName=$TESTLambdaBucketNamePrimary" "CKEBUCKET=$TESTReportingDataBucketNamePrimary" --tags "Project=Xenial Transaction Streaming" "CostCenter=Corporate Applications" "Owner=Corporate Applications" Environment=TEST SupportPartner=AWS Team=Integration ProjectExpiration=12/31/9999 CreatedBy=vvegesna@ckr.com
+        restapiid=$(aws --region us-east-2 cloudformation describe-stacks --stack-name CF-CKEXENIAL-TEST --query 'Stacks[0].Outputs[?OutputKey==`RestAPIId`].OutputValue' --output text)
+        aws apigateway create-deployment --rest-api-id $restapiid --stage-name $TestStageName

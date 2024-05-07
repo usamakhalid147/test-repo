@@ -1,0 +1,129 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Parameters:
+  # Artifact Bucket has to be created prior to the deployment of the codepipeline
+  ArtifactBucketName:
+    Type: String
+    Default: codepipeline-us-east-2-889659660414
+  # Github Source Details
+  GithubUser:
+    Type: String
+    Default: CKERestaurants
+  GithubRepo:
+    Type: String
+    Default: AWS-Xenial
+  GithubBranch:
+    Type: String
+    Default: PROD
+
+Resources:
+  CodePipelineServiceRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CodePipelineAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                  - 's3:GetObjectVersion'
+                  - 's3:GetBucketVersioning'
+                  - 's3:PutObject'
+                  - 's3:PutObjectAcl'
+                  - 's3:ListBucket'
+                Resource:
+                  - !Sub 'arn:aws:s3:::${ArtifactBucketName}'
+                  - !Sub 'arn:aws:s3:::${ArtifactBucketName}/*'
+              - Effect: Allow
+                Action:
+                  - 'codebuild:StartBuild'
+                  - 'codebuild:BatchGetBuilds'
+                Resource: '*'
+
+  CodePipeline:
+    Type: 'AWS::CodePipeline::Pipeline'
+    Properties:
+      Name: CKEIntegrationXenial-Prod
+      RoleArn: !GetAtt CodePipelineServiceRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ArtifactBucketName
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: Source
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Version: '1'
+                Provider: GitHub
+              RunOrder: 1
+              Configuration:
+                Owner: !Ref GithubUser
+                Repo: !Ref GithubRepo
+                Branch: !Ref GithubBranch
+                PollForSourceChanges: "true"
+                OAuthToken: '{{resolve:secretsmanager:github/CKERestaurants/AWS-Xenial:SecretString}}'
+              OutputArtifacts:
+                - Name: SourceArtifact
+              Region: !Sub ${AWS::Region}
+        - Name: DeployToProd
+          Actions:
+            - Name: CloudformationDeployment
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              RunOrder: 2
+              Configuration:
+                ProjectName: !Ref DeployCloudformation
+                EnvironmentVariables: '[{"name":"Env","value":"dev"}]'                
+              OutputArtifacts:
+                - Name: BuildArtifactProd
+              InputArtifacts:
+                - Name: SourceArtifact
+              Region: !Sub ${AWS::Region}
+              Namespace: ProdDeploymentResults         
+
+  CodeBuildServiceRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      # Providing elevated permissions so that resources can be deploed through the pipeline without changes in the permissions
+      Policies:
+        - PolicyName: CodeBuildAdminAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: '*'
+                Resource: '*'
+
+  DeployCloudformation:
+    Type: 'AWS::CodeBuild::Project'
+    Properties:
+      ServiceRole: !GetAtt CodeBuildServiceRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:5.0
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: 'buildspec/buildspec_prod.yaml'

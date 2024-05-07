@@ -1,0 +1,674 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CloudFormation template for Xenial Order Stream deployment
+
+Parameters:
+  StageName:
+    Description: The environment name (e.g., dev, test, prod)
+    Type: String
+
+  LambdaBucketName:
+    Description: Path in CKE bucket
+    Type: String
+
+  XenialOrderLambdaVersion:
+    Description: Lambda object version for Xenial Order
+    Type: String
+
+
+  ReplayXenialOrdersLambdaVersion:
+    Description: Lambda object version for Replay Xenial Order
+    Type: String
+
+  TokenValidationXenialLambdaVersion:
+    Description: Lambda object version for TokenValidation Xenial Order
+    Type: String
+
+  XenialAuthCode:
+    Description: Authorization code used for Xenial
+    Type: String
+
+  FirehoseStreamName:
+    Type: String
+    Description: Name of the Firehose Stream.
+    Default: crunchtime
+
+  MetadataColumnName:
+    Type: String
+    Default: 'metadata'
+    Description: Name of the column for metadata.
+    Default: ""
+
+  KinesisFirehoseS3BucketName:
+    Type: String
+    Description: The name of the S3 bucket for Kinesis Firehose
+
+  SnowflakeAccountUrl:
+    Type: String
+    Description: URL of the Snowflake account, excluding the schema, database, or warehouse identifiers.
+
+  SnowflakeUser:
+    Type: String
+    Description: User login name for the Snowflake account.
+
+  SnowflakePrivateKey:
+    Type: String
+    Description: The private key used for encrypting the Snowflake client, base64 encoded.
+
+  SnowflakeKeyPassphrase:
+    Type: String
+    NoEcho: true
+    Description: Passphrase to decrypt the private key when the key is encrypted.
+
+  SnowflakeDatabase:
+    Type: String
+    Description: The Snowflake database where the data table is located.
+
+  SnowflakeSchema:
+    Type: String
+    Description: The schema under the specified database.
+
+  SnowflakeTable:
+    Type: String
+    Description: The Snowflake table where data will be inserted.
+
+Conditions:
+  IsDev: !Equals [!Ref StageName,'dev']
+  IsTest: !Equals [!Ref StageName,'test']
+  IsProd: !Equals [!Ref StageName,'prod']
+  
+Resources:
+  KinesisStream:
+    Type: AWS::Kinesis::Stream
+    Properties:
+      Name: XenialOrderStream
+      RetentionPeriodHours: 720
+      StreamModeDetails:
+        StreamMode: ON_DEMAND
+      Tags:
+        - Key: Function
+          Value: Streaming Data for Xenial
+
+  FirehoseDeliveryStream:
+    Type: AWS::KinesisFirehose::DeliveryStream
+    Properties:
+      DeliveryStreamType: KinesisStreamAsSource
+      DeliveryStreamName: !Ref FirehoseStreamName
+      KinesisStreamSourceConfiguration:
+        KinesisStreamARN: !GetAtt KinesisStream.Arn
+        RoleARN: !GetAtt FirehoseDeliveryRole.Arn
+      SnowflakeDestinationConfiguration:
+        RoleARN: !GetAtt FirehoseDeliveryRole.Arn
+        AccountUrl: !Ref SnowflakeAccountUrl
+        S3Configuration:
+          BucketARN: !Sub 'arn:aws:s3:::${KinesisFirehoseS3BucketName}'
+          RoleARN: !GetAtt FirehoseDeliveryRole.Arn
+          BufferingHints:
+            SizeInMBs: 5
+            IntervalInSeconds: 300
+          CompressionFormat: UNCOMPRESSED
+          Prefix: 'logs/'
+        User: !Ref SnowflakeUser
+        PrivateKey: !Ref SnowflakePrivateKey
+        Database: !Ref SnowflakeDatabase
+        Schema: !Ref SnowflakeSchema
+        Table: !Ref SnowflakeTable
+
+  FirehoseDeliveryRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: firehose.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: FirehoseToKinesisAndS3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "kinesis:DescribeStream"
+                  - "kinesis:GetShardIterator"
+                  - "kinesis:GetRecords"
+                  - "kinesis:ListShards"
+                Resource: !Sub 'arn:aws:kinesis:${AWS::Region}:${AWS::AccountId}:stream/${KinesisStream}'
+              - Effect: Allow
+                Action:
+                  - "s3:PutObject"
+                  - "s3:GetObject"
+                  - "s3:DeleteObject"
+                  - "s3:ListBucket"
+                Resource:
+                  - !Sub 'arn:aws:s3:::${KinesisFirehoseS3BucketName}/*'
+                  - !Sub 'arn:aws:s3:::${KinesisFirehoseS3BucketName}'
+
+  XenialLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      #RoleName: XenialLambda
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+                - apigateway.amazonaws.com
+            Action: sts:AssumeRole
+      Description: IAM role is used for the Xenial Lambda function.
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonKinesisFullAccess
+        - arn:aws:iam::aws:policy/AWSXrayWriteOnlyAccess
+        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+        - arn:aws:iam::aws:policy/SecretsManagerReadWrite
+        - arn:aws:iam::aws:policy/CloudWatchFullAccess
+        - arn:aws:iam::aws:policy/AmazonSQSFullAccess
+        - arn:aws:iam::aws:policy/CloudWatchLambdaInsightsExecutionRolePolicy
+        - arn:aws:iam::aws:policy/AWSLambda_FullAccess
+      Tags:
+        - Key: Function
+          Value: Permission to Xenial Lambda Function
+
+  CloudWatchLogsPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: CloudWatchLogsPolicy
+      Roles:
+        - !Ref XenialLambdaExecutionRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: "*"
+
+
+  Queue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: Xenial
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt DLQ.Arn
+        maxReceiveCount: 5
+      Tags:
+        - Key: Function
+          Value: Records Xenial Order Calls which Failed
+  DLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: XenialDLQ
+      Tags:
+        - Key: Function
+          Value: DLQ for Xenial Queue
+
+  SnowflakeConnectorLayer:
+    Type: AWS::Lambda::LayerVersion
+    Properties:
+      LayerName: PythonSnowflakeConnector
+      Description: "Lambda layer used for snowflake connection"
+      Content:
+        S3Bucket: !Ref LambdaBucketName
+        S3Key: layers/snowflake-connector/PythonSnowflakeConnector.zip
+      CompatibleRuntimes:
+        - python3.9
+      CompatibleArchitectures:
+        - x86_64      
+          
+  XenialOrdersFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      FunctionName: XenialOrders
+      Code:
+        S3Bucket: !Ref LambdaBucketName
+        S3Key: lambdas/XenialOrders.zip
+        S3ObjectVersion: !Ref XenialOrderLambdaVersion
+      Handler: lambda_function.lambda_handler
+      Role: !GetAtt XenialLambdaExecutionRole.Arn
+      Runtime: python3.9
+      Description: 'Lambda function to process XenialOrders from Kinesis Stream'
+      Environment:
+        Variables:
+          ENV: !Ref StageName
+      Timeout: 120
+      MemorySize: 256
+      EphemeralStorage:
+        Size: 512
+      DeadLetterConfig:
+        TargetArn: !GetAtt DLQ.Arn
+      TracingConfig:
+        Mode: Active
+      Layers:
+        - !Ref SnowflakeConnectorLayer
+      PackageType: Zip
+      Architectures:
+        - x86_64
+      Tags:
+        - Key: Function
+          Value: Process Xenial Orders
+
+  KinesisEventSourceMapping:
+    Type: 'AWS::Lambda::EventSourceMapping'
+    Properties:
+      BatchSize: 800
+      MaximumBatchingWindowInSeconds: 300
+      ParallelizationFactor: 5
+      EventSourceArn: !GetAtt KinesisStream.Arn
+      FunctionName: !GetAtt XenialOrdersFunction.Arn
+      StartingPosition: LATEST
+      MaximumRetryAttempts: 2
+      MaximumRecordAgeInSeconds: -1 #Never discard old records
+      BisectBatchOnFunctionError: true  # This enables retries when function errors occur
+      DestinationConfig:
+        OnFailure:
+          Destination: !GetAtt Queue.Arn
+
+  replaySNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: replaySNS
+      TopicName: replaySNS
+      Tags:
+        - Key: Function
+          Value: Allows API calls to Replay the Orders
+  
+  replaySNSSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: lambda
+      TopicArn: !Ref replaySNSTopic
+      Endpoint: !GetAtt ReplayXenialFunction.Arn
+
+  XenialAPISNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: xenial-api-failures
+      TopicName: xenial-api-failures
+      Subscription:
+        - Protocol: "email"
+          Endpoint: informaticasupport@ckr.com
+      Tags:
+        - Key: Function
+          Value: MonitoringLogging for Xenial  
+  
+  XenialDLQSNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: xenial-DLQ-messages
+      TopicName: xenial-DLQ-messages
+      Subscription:
+        - Protocol: "email"
+          Endpoint: informaticasupport@ckr.com
+      Tags:
+        - Key: Function
+          Value: MonitoringLogging for Xenial     
+
+  DLQSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: sqs
+      TopicArn: !Ref XenialDLQSNSTopic
+      Endpoint: !GetAtt DLQ.Arn
+
+  XenialTransactionModel:
+    Type: AWS::ApiGateway::Model
+    Properties:
+      RestApiId: !Ref Api
+      ContentType: application/json
+      Name: XenialTransactionModel
+      Schema:
+        Fn::Sub: |
+          {
+            "$schema": "http://json-schema.org/draft-04/schema#",
+            "title": "XenialOrder",
+            "type": "object",
+            "properties": {
+              "data": {
+                "type": "object",
+                "properties": {
+                  "site_info": {
+                    "type": "object",
+                    "properties": {
+                      "state": {
+                        "type": "string"
+                      }
+                    },
+                    "required": ["state"]
+                  }
+                }
+              }
+            }
+          }
+
+  Api:
+    Type: 'AWS::ApiGateway::RestApi'
+    Properties:
+      Name: 'XenialOrders'
+      Description: 'Xenial API'
+      FailOnWarnings: 'true'
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+      Tags:
+        - Key: Function
+          Value: API Hosting for Xenial
+
+  ApiDeployment:
+    Type: 'AWS::ApiGateway::Deployment'
+    DependsOn:
+      - replayMethod
+      - OrdersMethod
+    Properties:
+      RestApiId: !Ref Api
+
+  ApiStage:
+    Type: 'AWS::ApiGateway::Stage'
+    Properties:
+      RestApiId: !Ref Api
+      StageName: !Ref StageName
+      DeploymentId: !Ref ApiDeployment
+      TracingEnabled: true
+      #MethodSettings:
+      #  - HttpMethod: POST
+      #    ResourcePath: /receiveorders
+      #    DataTraceEnabled: true
+      #  - HttpMethod: POST
+      #    ResourcePath: /replayorders
+      #    DataTraceEnabled: true
+      MethodSettings:
+        - LoggingLevel: INFO
+          HttpMethod: "*"
+          ResourcePath: "/*"
+          DataTraceEnabled: true
+          MetricsEnabled: true
+      Tags:
+        - Key: Function
+          Value: Serve the API End point
+        
+  OrdersResource:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      RestApiId: !Ref Api
+      ParentId: !GetAtt 'Api.RootResourceId'
+      PathPart: 'receiveorders'
+
+  ReplayResource:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      RestApiId: !Ref Api
+      ParentId: !GetAtt 'Api.RootResourceId'
+      PathPart: 'replayorders'
+
+  validateauthResource:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      RestApiId: !Ref Api
+      ParentId: !GetAtt 'Api.RootResourceId'
+      PathPart: 'validateauth'
+  
+  replayMethod:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: POST
+      ResourceId: !Ref ReplayResource
+      RestApiId: !Ref Api
+      RequestModels:
+        application/json: 'Empty'
+      MethodResponses:
+        - StatusCode: 200
+          ResponseModels:
+            application/json: 'Empty'
+      Integration:
+        IntegrationHttpMethod: POST
+        Type: AWS
+        Uri: !Sub
+            - arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaArn}/invocations
+            - LambdaArn: !GetAtt ReplayXenialFunction.Arn
+        RequestTemplates:
+          application/json: |
+            {
+              "method": "$context.httpMethod",
+              "body": $input.json('$'),
+              "headers": {
+                #foreach($param in $input.params().header.keySet())
+                  "$param": "$util.escapeJavaScript($input.params().header.get($param))"
+                  #if($foreach.hasNext),#end
+                #end
+              }
+            }
+        PassthroughBehavior: WHEN_NO_MATCH
+        ContentHandling: CONVERT_TO_TEXT
+        TimeoutInMillis: 29000
+        IntegrationResponses:
+          - StatusCode: 200
+
+  OrdersMethod:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: POST
+      ResourceId: !Ref OrdersResource
+      RestApiId: !Ref Api
+      RequestModels:
+        application/json: !Ref XenialTransactionModel
+      MethodResponses:
+        - StatusCode: 200
+          ResponseModels:
+            application/json: 'Empty'
+      Integration:
+        IntegrationHttpMethod: POST
+        Type: AWS
+        Uri: !Sub
+          - arn:aws:apigateway:${AWS::Region}:kinesis:action/PutRecord
+          - {}
+        Credentials: !GetAtt XenialLambdaExecutionRole.Arn
+        RequestParameters:
+          integration.request.header.Content-Type: "'application/x-amz-json-1.1'"
+        RequestTemplates:
+          application/json: |
+            #set($inputPath = $input.path('$'))
+            {
+                "PartitionKey": "$inputPath.data.site_info.store_number",
+                "Data": "$util.base64Encode($input.json('$'))",
+                "StreamName": "XenialOrderStream"
+            }
+        PassthroughBehavior: WHEN_NO_TEMPLATES
+        TimeoutInMillis: 29000
+        IntegrationResponses:
+          - StatusCode: 200
+
+  validateauthMethod:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: POST
+      ResourceId: !Ref validateauthResource
+      RestApiId: !Ref Api
+      MethodResponses:
+        - StatusCode: 200
+          ResponseModels:
+            application/json: 'Empty'
+      ApiKeyRequired: false
+      Integration:
+        IntegrationHttpMethod: POST
+        Type: AWS
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ValidateTokenFunction.Arn}/invocations"
+        Credentials: !GetAtt XenialLambdaExecutionRole.Arn
+        RequestTemplates:
+          application/json: |
+            {
+              "method": "$context.httpMethod",
+              "body": $input.json('$'),
+              "headers": {
+                #foreach($param in $input.params().header.keySet())
+                  "$param": "$util.escapeJavaScript($input.params().header.get($param))"
+                  #if($foreach.hasNext),#end
+                #end
+              }
+            }
+        PassthroughBehavior: WHEN_NO_TEMPLATES
+        ContentHandling: CONVERT_TO_TEXT
+        IntegrationResponses:
+          - StatusCode: 200
+
+  ReplayXenialFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: replayXenialOrders
+      Description: 'Lambda function to replay xenialorders'
+      Code:
+        S3Bucket: !Ref LambdaBucketName
+        S3Key: lambdas/replayXenialOrders.zip
+        S3ObjectVersion: !Ref ReplayXenialOrdersLambdaVersion
+      Handler: lambda_function.lambda_handler
+      Role: !GetAtt XenialLambdaExecutionRole.Arn
+      Runtime: python3.9
+      Timeout: 900
+      MemorySize: 10240
+      Environment:
+        Variables:
+          XENIAL_SCHEMA_NAME: STAGE_XENIAL
+          KINESIS_STREAM_NAME: XenialOrderStream
+          SNS_ARN: arn:aws:sns:us-east-1:853641056903:fetchXenialDataTopic
+          AUTHORIZATION_KEY: !Sub '${XenialAuthCode}'
+      TracingConfig:
+        Mode: PassThrough
+      Layers:
+        - !Ref SnowflakeConnectorLayer
+      PackageType: Zip
+      Architectures:
+        - x86_64
+      EphemeralStorage:
+        Size: 10238
+      Tags:
+        - Key: Function
+          Value: Process Replay Xenial Orders
+
+  SNSLambdaPermissions:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt ReplayXenialFunction.Arn
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref replaySNSTopic
+
+  APILambdaPermissions:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt ReplayXenialFunction.Arn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${Api}/*/POST/replayorders"
+
+  XenialApiFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: XenialApiFailureAlarm
+      AlarmDescription: Alarm for API failure rate
+      Namespace: AWS/ApiGateway
+      MetricName: 4XXError
+      Dimensions:
+        - Name: ApiName
+          Value: !Ref Api
+      Statistic: Sum
+      Period: 3600  # 1 hour
+      EvaluationPeriods: 1
+      Threshold: 10
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      AlarmActions:
+        - !Ref XenialAPISNSTopic
+      Tags:
+        - Key: Function
+          Value: MonitoringLogging for Xenial
+
+  tokenvalidationIAMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: "/service-role/"
+      #RoleName: "xenialtokenvalidation"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service: "lambda.amazonaws.com"
+            Action: "sts:AssumeRole"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonKinesisFullAccess
+      Tags:
+        - Key: Function
+          Value: Allow Lambda to Call Kinesis
+      
+  tokenvalidationIAMRolePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: "MyLambdaPolicy"
+      Roles:
+        - !Ref tokenvalidationIAMRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource:
+              - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/tokenvalidationXenial:*"
+
+  ValidateTokenFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: tokenvalidationXenial
+      Code:
+        S3Bucket: !Ref LambdaBucketName
+        S3Key: lambdas/tokenvalidationxenial.zip
+        S3ObjectVersion: !Ref TokenValidationXenialLambdaVersion
+      Runtime: python3.9
+      Role: !GetAtt tokenvalidationIAMRole.Arn
+      Handler: lambda_function.lambda_handler
+      Timeout: 900
+      MemorySize: 128
+      Environment:
+        Variables:
+          AUTHORIZATION_KEY: !Sub '${XenialAuthCode}'
+          STREAM_NAME: XenialOrderStream
+      TracingConfig:
+        Mode: PassThrough
+      Layers:
+        - !Ref SnowflakeConnectorLayer
+      PackageType: Zip
+      Architectures:
+        - x86_64
+      Tags:
+        - Key: Function
+          Value: Function which puts data to Kinesis
+
+  XenialOrdersUsagePlan:
+    Type: 'AWS::ApiGateway::UsagePlan'
+    Properties:
+      UsagePlanName: XenialOrdersUsagePlan
+      ApiStages:
+        - ApiId: !Ref Api
+          Stage: !Ref ApiStage
+
+  APILambdaInvokePermissions:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt ValidateTokenFunction.Arn
+      Principal: apigateway.amazonaws.com
+      #SourceArn: 
+      #  Fn::Sub: arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${Api}/*/POST/validatetoken
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${Api}/*/POST/validateauth"
+      
+Outputs:
+  RestAPIId:
+    Description: "API Gateway Rest API ID for Xenial Orders"
+    Value: !Ref Api

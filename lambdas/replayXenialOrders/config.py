@@ -1,0 +1,13 @@
+import os
+
+secret_name = "PocSnowflakeCreds"
+region_name = os.environ.get('AWS_REGION')
+KINESIS_STREAM_NAME = os.environ.get('KINESIS_STREAM_NAME')
+XENIAL_SCHEMA_NAME = os.environ.get('XENIAL_SCHEMA_NAME')
+POC_RAW_XENIAL_ORDERS = 'POC_RAW_XENIAL_ORDERS'
+XENIAL_RESEND_RECORDS_COUNT = 'XENIAL_RESEND_RECORDS_COUNT'
+
+SNS_ARN = os.environ.get('SNS_ARN')
+
+SUCCESS = 1
+FAILED = 0

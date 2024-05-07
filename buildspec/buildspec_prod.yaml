@@ -1,0 +1,69 @@
+version: 0.2
+
+env:
+  variables:
+    PRODCrossAccountRoleArn: arn:aws:iam::903063718783:role/cross-account-role-serverless-deployment
+
+    prodStageName: "prod"
+    PRODSourceBucketNamePrimary: "ckevendor"
+    PRODReportingDataBucketNamePrimary: "ckereportingdata"
+    PRODLambdaBucketNamePrimary: "devckelambda"
+    PRODArchiveBucketNamePrimary: "ckearchive"
+    PRODConfigBucketNamePrimary: "devckelambda"
+
+    #PRODStageName: "PROD"
+    # PRODSourceBucketNameSecondary: "PRODckevendor"
+    # PRODReportingDataBucketNameSecondary: "PRODckereportingdata-us-east-1"
+    # PRODLambdaBucketNameSecondary: "PRODckelambda-us-east-1"
+    # PRODArchiveBucketNameSecondary: "PRODckearchive-us-east-1"
+    # PRODConfigBucketNameSecondary: "PRODckelambda-us-east-1"
+
+
+phases:
+  pre_build:
+    commands:
+      - |
+        python --version
+        for dir in lambdas/*; do
+          if [ -d "$dir" ]; then
+            folder_name=$(basename "$dir")
+            pushd $dir
+            ls -ltra
+            # Run pip install if requirements.txt exists
+            if [ -f "requirements.txt" ]; then
+              pip install -r requirements.txt -t .
+            fi            
+            zip -q -r "$folder_name.zip" *
+            aws s3 cp "$folder_name.zip" "s3://$PRODLambdaBucketNamePrimary/lambdas/$folder_name.zip"
+            aws s3 cp "$folder_name.zip" "s3://$PRODLambdaBucketNameSecondary/lambdas/$folder_name.zip"
+            rm "$folder_name.zip"
+            popd
+
+            xenial_order_version_primary=$(aws s3api head-object --bucket "$PRODLambdaBucketNamePrimary" --key "lambdas/XenialOrders.zip" | jq -r ".VersionId")
+            replayXenialOrders_version_primary=$(aws s3api head-object --bucket "$PRODLambdaBucketNamePrimary" --key "lambdas/replayXenialOrders.zip" | jq -r ".VersionId")
+            tokenvalidationxenial_version_primary=$(aws s3api head-object --bucket "$PRODLambdaBucketNamePrimary" --key "lambdas/tokenvalidationxenial.zip" | jq -r ".VersionId")
+
+            # xenial_order_version_secondary=$(aws s3api head-object --bucket "$PRODLambdaBucketNameSecondary" --key "lambdas/XenialOrders.zip" | jq -r ".VersionId")
+            # replayXenialOrders_version_secondary=$(aws s3api head-object --bucket "$PRODLambdaBucketNameSecondary" --key "lambdas/replayXenialOrders.zip" | jq -r ".VersionId")
+            # tokenvalidationxenial_version_secondary=$(aws s3api head-object --bucket "$PRODLambdaBucketNameSecondary" --key "lambdas/tokenvalidationxenial.zip" | jq -r ".VersionId")
+
+          fi
+        done
+        ## Upload the Layer archive to Lambda Bucket
+        #aws s3 cp "layers/snowflake-connector/PythonSnowflakeConnector.zip" "s3://$PRODLambdaBucketName/layers/snowflake-connector/PythonSnowflakeConnector.zip"
+        #snowflake_connector_s3_object_version=$(aws s3api head-object --bucket "$PRODLambdaBucketName" --key "layers/snowflake-connector/PythonSnowflakeConnector.zip" | jq -r ".VersionId")
+        
+        #Use xenial AWS secret for authorization
+        Xenial_secret=$(aws secretsmanager get-secret-value --secret-id github/xenial/authorization --query SecretString --output text --region us-east-2)
+  post_build:
+    commands:
+      - |
+        
+        ## Assume the cross-account role to PROD account
+        aws sts assume-role --role-arn $PRODCrossAccountRoleArn --role-session-name "AssumeRoleSession" > assumed_role.json
+        export AWS_ACCESS_KEY_ID=$(cat assumed_role.json | jq -r '.Credentials.AccessKeyId')
+        export AWS_SECRET_ACCESS_KEY=$(cat assumed_role.json | jq -r '.Credentials.SecretAccessKey')
+        export AWS_SESSION_TOKEN=$(cat assumed_role.json | jq -r '.Credentials.SessionToken')
+        aws --region us-east-2 cloudformation deploy --template-file ./config/xenial.yaml --stack-name CF-CKEXENIAL-PROD --s3-bucket $PRODLambdaBucketNamePrimary --capabilities CAPABILITY_NAMED_IAM  --parameter-overrides  "ArchiveBucketName=$PRODArchiveBucketNamePrimary" "StageName=$PRODStageName" "XenialOrderLambdaVersion=$xenial_order_version_primary" "XenialAuthCode=$Xenial_secret" "ReplayXenialOrdersLambdaVersion=$replayXenialOrders_version_primary" "TokenValidationXenialLambdaVersion=$tokenvalidationxenial_version_primary" "LambdaBucketName=$PRODLambdaBucketNamePrimary" "CKEBUCKET=$PRODReportingDataBucketNamePrimary" --tags "Project=Xenial Transaction Streaming" "CostCenter=Corporate Applications" "Owner=Corporate Applications" Environment=PROD SupportPartner=AWS Team=Integration ProjectExpiration=12/31/9999 CreatedBy=vvegesna@ckr.com
+        restapiid=$(aws --region us-east-2 cloudformation describe-stacks --stack-name CF-CKEXENIAL-PROD --query 'Stacks[0].Outputs[?OutputKey==`RestAPIId`].OutputValue' --output text)
+        aws apigateway create-deployment --rest-api-id $restapiid --stage-name $PRODStageName

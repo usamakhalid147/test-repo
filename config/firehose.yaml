@@ -1,0 +1,128 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Setup Integration Utility Stack
+Parameters:
+  FirehoseStreamName:
+    Type: String
+    Description: Name of the Firehose Stream.
+    Default: crunchtime
+
+  MetadataColumnName:
+    Type: String
+    Default: 'metadata'
+    Description: Name of the column for metadata.
+    Default: payload
+
+  KinesisFirehoseS3BucketName:
+    Type: String
+    Description: The name of the S3 bucket for Kinesis Firehose
+    Default: firehosestreamsnowflaketest
+
+  SnowflakeAccountUrl:
+    Type: String
+    Description: URL of the Snowflake account, excluding the schema, database, or warehouse identifiers.
+    Default: https://upvocpw-cm23246.snowflakecomputing.com
+
+  SnowflakeUser:
+    Type: String
+    Description: User login name for the Snowflake account.
+    Default: usama1437
+
+  SnowflakePrivateKey:
+    Type: String
+    Description: The private key used for encrypting the Snowflake client, base64 encoded.
+    Default: MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQDSOYUSw7zJRRRnWGmiVTAVJf/UGwoMobJTHjq18pYara6wesDjyIKMODYkowsBH7pjogFbg6rq3ArMCz9eT22RN92ASYd5KsLuB8TznKtWeH38+7P735glczD/4vJzcZTugca5B829ZQ36DX2KPyuxeIGLiP3Vlq3qYN8E8vh0Nb8iCeXhjtjXkUlabcIoVrWK5Af6snix0NROs9+OtrsDpWqqLlP9sqkbQcmyrf3kMgb9tH8wXnJb3Vj6gGWYgAXFLKqqNRe0RsK1ukrG67bVtk8eCQuYOyM3G6oQUXl7P/5wNZy1gLx89nO2ghqmZPB50C5/AANans8nYMlTTL59AgMBAAECggEAVaZDtmJzLxlq97QIza+heGxT78nYbU8PxVeCmhCs4U+z5YkNv4A42AIq5QBcgme329HsdamOYEOoTnuipLz9qfW11AehH1extaMKtio1kHRk+EZgjRUK+u8UnpyLJUe4YvgSy94HD8v1RtRqOoIEPjkXpo74xCWw09YF5xFK8qUZSBoSTKDBFxI146vMrvfLOo5ffbwHKxiCZ7rgdLhVR3RTeWLNTSJ2317dqVIKYAjCU3hQ4kaqVFav2D5htwRSxMHnbLtHlOyacs9/brGrzUMb5u2VSIrQCiVJtpz/O+3ADAWXlccbJBJHFI6WQKg7RxSpCz25Lb8wnZ87MMcUDQKBgQD/Gglvbvf8TUZhHQgfTAhND5JnYXhlWy6mGGLbkd8bGdT6ZmbIqQI8lJFzqe5H3AdaWhqq050kxiLDJpOTQAoyvwpvOqnrqUmvCW7lgNAfh0SoVORk2lllslLQ2lHPlcFJblrl/X4f5OGBa538E5BaUPodkh/a5JOujqHLEZzV7wKBgQDS9wc8wIH2jZ3cJqOPN7rGiIPqBRBXZmYSGU+ki+HucDLWW1zJ6Pld4yoNEgD6JsdfHuRZ2uxiWgkzyP40WMRFxyB06s4tWr8bto3HODHx1+JEO91J05jPnt6TUV/M8Ke2tNmJyZjQDKAXNOP/Ih91Cm8weq3lQbhYEpjYgBS+UwKBgBJUZ5snKRBq6QSvVlcRWoNW/BkLiuAVhiuPEwNd3t8Ooxv+4aHHaw65Sh46dpGZQLoAQWxG2kK7LeJB0lbBQjpVOcW2PGFff5jhH6PD9rBdQtSpjOOmQMgq4QJ6vWgiBYpmMIfYCAj4pC9tcSOcsEGdEeuwBTPwOqBPRVbXBCLnAoGAHxK9oSglvGANkWCrlKu7ugRfkbefOZBelmnd/jmQVKN4CXS5jQ/gswCDsBsnw7C0iwEs10NUsAPc+SCwuJsehbyXvkDbj3ifT4CrD13qlVmb/TroFDizeFlJJV/GAZSsz0+B/zaPaI2DgweKUYkAIygfSn+3X143vdk3ZCQxafsCgYBoWbFEgFtP5P7u+PYI50odoJ0AxhzWbiKZld4KaxHa/uEfVIi3Ynlabx0JMwi8Ms/62EU0oUaN0+g9DrOjl1k0gMi6hhg5BTBL3WKIZ/SyLGnKsFyihFVYeLsbvZChmo6UJhPv3MpOf3Pm7ggGBaLJhCjn84RpfVwtAut8xlZRXg==
+
+  # SnowflakeKeyPassphrase:
+  #   Type: String
+  #   NoEcho: true
+  #   Description: Passphrase to decrypt the private key when the key is encrypted.
+
+  SnowflakeDatabase:
+    Type: String
+    Description: The Snowflake database where the data table is located.
+    Default: POC_DATABASE
+
+  SnowflakeSchema:
+    Type: String
+    Description: The schema under the specified database.
+    Default: POC_SCHEMA
+
+  SnowflakeTable:
+    Type: String
+    Description: The Snowflake table where data will be inserted.
+    Default: TEST_STREAM
+
+Resources:
+  KinesisStream:
+    Type: AWS::Kinesis::Stream
+    Properties:
+      Name: XenialOrderStream
+      RetentionPeriodHours: 720
+      StreamModeDetails:
+        StreamMode: ON_DEMAND
+      Tags:
+        - Key: Function
+          Value: Streaming Data for Xenial
+
+  FirehoseDeliveryStream:
+    Type: AWS::KinesisFirehose::DeliveryStream
+    Properties:
+      DeliveryStreamType: KinesisStreamAsSource
+      DeliveryStreamName: !Ref FirehoseStreamName
+      KinesisStreamSourceConfiguration:
+        KinesisStreamARN: !GetAtt KinesisStream.Arn
+        RoleARN: !GetAtt FirehoseDeliveryRole.Arn
+      #ErrorOutputPrefix: 'error_logs/'  # Prefix for error logging
+      SnowflakeDestinationConfiguration:
+        RoleARN: !GetAtt FirehoseDeliveryRole.Arn
+        AccountUrl: !Ref SnowflakeAccountUrl
+        ContentColumnName: !Ref MetadataColumnName
+        DataLoadingOption: VARIANT_CONTENT_AND_METADATA_MAPPING
+        S3Configuration:
+          BucketARN: !Sub 'arn:aws:s3:::${KinesisFirehoseS3BucketName}' #
+          RoleARN: !GetAtt FirehoseDeliveryRole.Arn  
+          BufferingHints:
+            SizeInMBs: 5  
+            IntervalInSeconds: 300 
+          CompressionFormat: UNCOMPRESSED  # You can choose GZIP, ZIP, or SNAPPY
+          Prefix: 'logs/'  # Prefix for the S3 storage path
+        User: !Ref SnowflakeUser
+        PrivateKey: !Ref SnowflakePrivateKey
+        KeyPassphrase: !Ref SnowflakeKeyPassphrase
+        Database: !Ref SnowflakeDatabase
+        Schema: !Ref SnowflakeSchema
+        Table: !Ref SnowflakeTable
+        MetadataColumnName: !Ref MetadataColumnName
+
+  FirehoseDeliveryRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: firehose.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: FirehoseToKinesisAndS3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "kinesis:DescribeStream"
+                  - "kinesis:GetShardIterator"
+                  - "kinesis:GetRecords"
+                  - "kinesis:ListShards"
+                Resource: !Sub 'arn:aws:kinesis:${AWS::Region}:${AWS::AccountId}:stream/${KinesisStream}'
+              - Effect: Allow
+                Action:
+                  - "s3:PutObject"
+                  - "s3:GetObject"
+                  - "s3:DeleteObject"
+                  - "s3:ListBucket"
+                Resource:
+                  - !Sub 'arn:aws:s3:::${KinesisFirehoseS3BucketName}/*'
+                  - !Sub 'arn:aws:s3:::${KinesisFirehoseS3BucketName}'
+
